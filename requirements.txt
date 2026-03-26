@@ -1,0 +1,8 @@
+httpx==0.28.1
+qdrant-client==1.13.3
+sentence-transformers==3.4.1
+numpy==2.2.3
+pypdf==5.4.0
+discord.py==2.5.2
+matplotlib==3.10.1
+pandas==2.2.3
