@@ -7,6 +7,9 @@ from pathlib import Path
 
 import discord
 import httpx
+from dotenv import load_dotenv
+
+load_dotenv()
 
 PY_BOT_TOKEN = os.getenv("PY_BOT_TOKEN", "")
 PY_TIMEOUT_SECONDS = int(os.getenv("PY_TIMEOUT_SECONDS", "20"))
@@ -25,6 +28,13 @@ ALLOWED_CHANNEL_IDS = {
     if x.strip().isdigit()
 }
 
+CSV_CACHE_DIR = Path(os.getenv("PY_CSV_CACHE_DIR", "data/python_bot_csv_cache"))
+CSV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def csv_cache_path(channel_id: int) -> Path:
+    return CSV_CACHE_DIR / f"{channel_id}.csv"
+
 
 def is_allowed(user_id: int, channel_id: int) -> bool:
     user_ok = not ALLOWED_USER_IDS or user_id in ALLOWED_USER_IDS
@@ -41,16 +51,59 @@ def extract_code(text: str) -> str:
     return raw
 
 
-async def extract_csv_attachment(message: discord.Message) -> tuple[bytes | None, str | None]:
-    if not message.attachments:
-        return None, None
+def sanitize_llm_code(text: str) -> str:
+    t = text.replace("<|im_end|>", "").replace("<|im_start|>", "").strip()
 
-    for a in message.attachments:
-        if (a.filename or "").lower().endswith(".csv"):
-            content = await a.read()
-            return content, "data.csv"
+    if "```" in t:
+        first = t.find("```")
+        second = t.find("```", first + 3)
+        if second != -1:
+            block = t[first + 3:second].strip()
+            if block.lower().startswith("python"):
+                block = block[6:].lstrip("\n").strip()
+            return block
 
-    return None, None
+    lines = [ln.rstrip() for ln in t.splitlines()]
+    start = 0
+    for i, ln in enumerate(lines):
+        stripped = ln.strip()
+        if stripped in {"python", "py"}:
+            start = i + 1
+            break
+        if stripped.startswith(("import ", "from ", "def ", "class ", "for ", "while ", "if ", "print(", "x =", "y =")):
+            start = i
+            break
+    code_lines = lines[start:]
+
+    cleaned: list[str] = []
+    for ln in code_lines:
+        stripped = ln.strip()
+        if not stripped:
+            cleaned.append(ln)
+            continue
+        if stripped.lower().startswith(("here's", "this code", "sure,")):
+            continue
+        if stripped in {"python", "py"}:
+            continue
+        cleaned.append(ln)
+
+    return "\n".join(cleaned).strip()
+
+
+async def extract_csv_attachment(message: discord.Message) -> tuple[bytes | None, str | None, bool]:
+    """Return csv bytes, csv name, and whether source was channel cache."""
+    if message.attachments:
+        for a in message.attachments:
+            if (a.filename or "").lower().endswith(".csv"):
+                content = await a.read()
+                csv_cache_path(message.channel.id).write_bytes(content)
+                return content, "data.csv", False
+
+    cache = csv_cache_path(message.channel.id)
+    if cache.exists():
+        return cache.read_bytes(), "data.csv", True
+
+    return None, None, False
 
 
 def run_python_snippet(code: str, csv_bytes: bytes | None = None, csv_name: str | None = None) -> tuple[int, str, Path | None]:
@@ -126,12 +179,8 @@ async def generate_code(
         resp.raise_for_status()
         data = resp.json()
 
-    text = data["choices"][0]["message"]["content"].strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("python"):
-            text = text[6:].lstrip("\n")
-    return text.strip()
+    text = data["choices"][0]["message"]["content"]
+    return sanitize_llm_code(text)
 
 
 async def autopy_loop(task_prompt: str, csv_bytes: bytes | None = None) -> tuple[str, int, int, str, Path | None]:
@@ -182,7 +231,16 @@ async def on_message(message: discord.Message) -> None:
         return
 
     text = (message.content or "").strip()
-    csv_bytes, csv_name = await extract_csv_attachment(message)
+    csv_bytes, csv_name, csv_from_cache = await extract_csv_attachment(message)
+
+    if text.lower().startswith("!csvclear"):
+        cache = csv_cache_path(message.channel.id)
+        if cache.exists():
+            cache.unlink()
+            await message.reply("Cached CSV for this channel was cleared.")
+        else:
+            await message.reply("No cached CSV found for this channel.")
+        return
 
     if text.lower().startswith("!autopy"):
         prompt = text[7:].strip()
@@ -199,7 +257,7 @@ async def on_message(message: discord.Message) -> None:
 
         header = f"AutoPy finished in {iterations} iteration(s), return code={rc}."
         if csv_bytes is not None:
-            header += " CSV attachment detected as ./data.csv."
+            header += " Using cached CSV ./data.csv." if csv_from_cache else " CSV attachment detected as ./data.csv."
         code_preview = f"```python\n{code[:1200]}\n```"
         out_preview = f"```\n{output[:1200]}\n```"
         reply_text = f"{header}\n\nGenerated code:\n{code_preview}\n\nOutput:\n{out_preview}"
@@ -216,9 +274,10 @@ async def on_message(message: discord.Message) -> None:
     if not code:
         await message.reply(
             "Usage: `!py <python code>` or fenced block.\n"
-            "You may attach one CSV; it will be available as `data.csv`.\n"
+            "You may attach one CSV; it will be cached as `data.csv` for this channel.\n"
             "Example: `!py import pandas as pd; print(pd.read_csv(\"data.csv\").head())`\n"
-            "Auto mode: `!autopy <what you want>`"
+            "Auto mode: `!autopy <what you want>`\n"
+            "Clear cached CSV: `!csvclear`"
         )
         return
 
@@ -234,7 +293,7 @@ async def on_message(message: discord.Message) -> None:
 
     prefix = f"exit_code={rc}\n"
     if csv_bytes is not None:
-        prefix += "csv=data.csv\n"
+        prefix += "csv=data.csv (cached)\n" if csv_from_cache else "csv=data.csv (new upload)\n"
     reply_text = f"```\n{prefix}{output[:1650]}\n```"
     if image_path and image_path.exists():
         await message.reply(reply_text, file=discord.File(str(image_path), filename="result.png"))

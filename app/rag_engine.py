@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
+
+from dotenv import load_dotenv
 from typing import Any
 
 import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 from sentence_transformers import SentenceTransformer
+
+load_dotenv()
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "lab_knowledge")

@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pypdf import PdfReader
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 from sentence_transformers import SentenceTransformer
 
+load_dotenv()
+
 DATA_DIR = Path("data/knowledge")
-COLLECTION = "lab_knowledge"
-EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+COLLECTION = os.getenv("QDRANT_COLLECTION", "lab_knowledge")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
+FULL_REBUILD = os.getenv("FULL_REBUILD", "false").lower() in {"1", "true", "yes"}
 SUPPORTED_SUFFIXES = {".md", ".txt", ".pdf"}
 
 
@@ -97,16 +103,20 @@ def iter_knowledge_files() -> list[Path]:
 
 def main() -> None:
     model = SentenceTransformer(EMBED_MODEL)
-    qdrant = QdrantClient(url="http://127.0.0.1:6333")
+    qdrant = QdrantClient(url=QDRANT_URL)
 
     dim = model.get_sentence_embedding_dimension()
-    if qdrant.collection_exists(COLLECTION):
-        qdrant.delete_collection(COLLECTION)
+    exists = qdrant.collection_exists(COLLECTION)
 
-    qdrant.create_collection(
-        collection_name=COLLECTION,
-        vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
-    )
+    if exists and FULL_REBUILD:
+        qdrant.delete_collection(COLLECTION)
+        exists = False
+
+    if not exists:
+        qdrant.create_collection(
+            collection_name=COLLECTION,
+            vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+        )
 
     points: list[PointStruct] = []
     files = iter_knowledge_files()
@@ -138,7 +148,8 @@ def main() -> None:
 
     if points:
         qdrant.upsert(collection_name=COLLECTION, points=points)
-        print(f"Ingested {len(points)} chunks from {len(files)} files under {DATA_DIR}")
+        mode = "full rebuild" if FULL_REBUILD else "incremental upsert"
+        print(f"Ingested {len(points)} chunks from {len(files)} files under {DATA_DIR} ({mode})")
     else:
         print(f"No ingestible files found in {DATA_DIR}")
 

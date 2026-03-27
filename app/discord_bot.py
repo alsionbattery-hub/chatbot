@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
+
+from dotenv import load_dotenv
 import sqlite3
 from pathlib import Path
 
 import discord
 
 from app.rag_engine import RagEngine
+
+load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 CORPUS_MODE = os.getenv("DISCORD_CORPUS", "all")
